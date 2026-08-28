@@ -1,5 +1,20 @@
 import logging
 
+try:
+    from backend.heuristics import inspect_heuristics
+except Exception:
+    inspect_heuristics = None
+
+try:
+    from backend.sandbox import capture_snapshot
+except Exception:
+    capture_snapshot = None
+
+try:
+    from backend.visual_matcher import BrandVisualMatcher
+except Exception:
+    BrandVisualMatcher = None
+
 from backend.database import (
     hash_url,
     lookup_url,
@@ -15,6 +30,7 @@ from backend.schemas import (
 )
 
 logger = logging.getLogger("quishshield")
+visual_matcher = BrandVisualMatcher() if BrandVisualMatcher else None
 
 
 def _record_to_scan_response(record) -> ScanResponse:
@@ -33,17 +49,19 @@ def _record_to_scan_response(record) -> ScanResponse:
         status=ThreatStatus(record.status),
 
         heuristics=HeuristicsResult(
-            heuristic_score=record.threat_score,
-            flags=["Result served from cache"],
+            heuristic_score=0.0,
+            flags=["Detailed analysis unavailable for cached result"],
         ),
 
         snapshot=SnapshotResult(
-            success=True,
+            success=False,
             resolved_url=record.url,
+            error="Detailed sandbox result unavailable for cached result",
         ),
 
         visual_match=VisualMatchResult(
             matched_brand=record.detected_brand,
+            detail="Detailed visual match unavailable for cached result",
         ),
     )
 
@@ -91,50 +109,127 @@ async def analyze_url(url: str) -> ScanResponse:
     # ---------------------------------------------------------
     # 3. Member 2 - Heuristics / WHOIS / lexical analysis
     # ---------------------------------------------------------
-    # TODO: Replace this mock with Member 2's real function.
+    try:
+        heuristic_data = (
+            await inspect_heuristics(normalized_url)
+            if inspect_heuristics
+            else None
+        )
+        if heuristic_data is None:
+            raise RuntimeError("Heuristic analyzer is unavailable")
+    except Exception as exc:
+        logger.exception("Heuristic scan failed for %s", normalized_url)
+        heuristic_data = {
+            "heuristic_score": 0.0,
+            "domain_age_days": None,
+            "is_typosquat": False,
+            "target_candidate": None,
+            "flags": [f"Heuristic analysis unavailable: {exc}"],
+        }
 
-    heuristics = HeuristicsResult(
-        heuristic_score=45.0,
-        domain_age_days=4,
-        is_typosquat=True,
-        target_candidate="OnlineSBI",
-        flags=[
-            "Domain age < 7 days",
-            "Suspicious TLD",
-        ],
-    )
+    try:
+        heuristics = HeuristicsResult(
+            heuristic_score=heuristic_data.get("heuristic_score", 0.0),
+            domain_age_days=heuristic_data.get("domain_age_days"),
+            is_typosquat=heuristic_data.get("is_typosquat", False),
+            target_candidate=heuristic_data.get("target_candidate"),
+            flags=heuristic_data.get("flags", []),
+        )
+    except Exception as exc:
+        logger.exception("Invalid heuristic result for %s", normalized_url)
+        heuristics = HeuristicsResult(
+            heuristic_score=0.0,
+            flags=[f"Invalid heuristic result: {exc}"],
+        )
 
     # ---------------------------------------------------------
     # 4. Member 3 - Playwright / sandbox snapshot
     # ---------------------------------------------------------
-    # TODO: Replace this mock with Member 3's real function.
+    sandbox_url = normalized_url
+    if not sandbox_url.startswith(("http://", "https://")):
+        sandbox_url = f"http://{sandbox_url}"
+
+    try:
+        sandbox_result = (
+            await capture_snapshot(sandbox_url)
+            if capture_snapshot
+            else None
+        )
+        if sandbox_result is None:
+            raise RuntimeError("Sandbox analyzer is unavailable")
+    except Exception as exc:
+        logger.exception("Sandbox scan failed for %s", normalized_url)
+        sandbox_result = {
+            "final_url": sandbox_url,
+            "error": str(exc),
+            "credential_fields": {},
+        }
+
+    credential_fields = sandbox_result.get("credential_fields", {})
 
     snapshot = SnapshotResult(
-        success=True,
-        resolved_url=normalized_url,
-        screenshot_path="temp_snapshots/mock.png",
-        has_credential_inputs=True,
-        page_title="Mock Login Page",
+        success=sandbox_result.get("error") is None,
+        resolved_url=sandbox_result.get("final_url"),
+        screenshot_path=sandbox_result.get("screenshot_path"),
+        redirected=sandbox_result.get("redirected", False),
+        redirect_chain=sandbox_result.get("redirect_chain", []),
+        page_description=sandbox_result.get("page_description"),
+        load_time_ms=sandbox_result.get("load_time_ms", 0),
+        has_credential_inputs=(
+            credential_fields.get("has_password_field", False)
+            or credential_fields.get("has_otp_field", False)
+            or credential_fields.get("has_card_field", False)
+            or credential_fields.get("has_login_field", False)
+        ),
+        suspicious_inputs=credential_fields.get("suspicious_inputs", []),
+        page_title=sandbox_result.get("page_title", ""),
+        error=sandbox_result.get("error"),
     )
 
     # ---------------------------------------------------------
     # 5. Member 4 - Visual brand matching
     # ---------------------------------------------------------
-    # TODO: Replace this mock with Member 4's real function.
+    try:
+        match_result = visual_matcher.compare_snapshot(
+            screenshot_path=snapshot.screenshot_path,
+            final_url=snapshot.resolved_url or sandbox_url,
+            page_title=snapshot.page_title or "",
+        ) if visual_matcher else None
+    except Exception as exc:
+        logger.exception("Visual matching failed for %s", normalized_url)
+        match_result = None
 
     visual_match = VisualMatchResult(
-        matched_brand="State Bank of India",
-        visual_similarity_score=92.4,
-        is_visual_spoof=True,
+        matched_brand=match_result.matched_brand if match_result else None,
+        visual_similarity_score=(match_result.confidence * 100) if match_result else 0.0,
+        is_visual_spoof=match_result.is_spoof if match_result else False,
+        domain_matches=match_result.domain_matches if match_result else True,
+        detail=(match_result.detail if match_result else "Visual analysis unavailable."),
+        method=match_result.method if match_result else None,
     )
 
     # ---------------------------------------------------------
     # 6. Temporary threat scoring
     # ---------------------------------------------------------
-    # TODO: Replace this with the final scoring/weighting system.
+    credential_risk = 100.0 if snapshot.has_credential_inputs else 0.0
+    visual_risk = (
+        visual_match.visual_similarity_score
+        if visual_match.is_visual_spoof
+        else 0.0
+    )
+    threat_score = round(min(
+        0.45 * heuristics.heuristic_score
+        + 0.35 * visual_risk
+        + 0.20 * credential_risk,
+        100.0,
+    ), 1)
 
-    threat_score = 78.5
-    status = ThreatStatus.CRITICAL_PHISHING
+    if threat_score >= 60:
+        status = ThreatStatus.CRITICAL_PHISHING
+    elif threat_score >= 30:
+        status = ThreatStatus.SUSPICIOUS
+    else:
+        status = ThreatStatus.SAFE
 
     # ---------------------------------------------------------
     # 7. Save result to database

@@ -38,7 +38,12 @@ class SnapshotResult(BaseModel):
     success: bool
     resolved_url: str | None = None
     screenshot_path: str | None = None
+    redirected: bool = False
+    redirect_chain: list[dict] = Field(default_factory=list)
+    page_description: str | None = None
+    load_time_ms: int = 0
     has_credential_inputs: bool = False
+    suspicious_inputs: list[str] = Field(default_factory=list)
     page_title: str | None = None
     error: str | None = None
 
@@ -49,6 +54,9 @@ class VisualMatchResult(BaseModel):
     matched_brand: str | None = None
     visual_similarity_score: float = 0.0
     is_visual_spoof: bool = False
+    domain_matches: bool = True
+    detail: str | None = None
+    method: str | None = None
 
 
 # ---------- Member 1 → Frontend ----------

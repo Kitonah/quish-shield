@@ -3,7 +3,7 @@
 |  QuiShield -- collect_data.py                                         |
 |                                                                       |
 |  WHAT THIS FILE DOES (in plain English):                              |
-|  Uses YOUR sandbox (sandbox.py) to automatically visit real brand     |
+|  Uses YOUR sandbox (sandbox.py) to automaticsally visit real brand     |
 |  websites and take screenshots. It saves them in organized folders    |
 |  so the training script can learn from them later.                    |
 |                                                                       |

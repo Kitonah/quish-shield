@@ -19,14 +19,18 @@ DATABASE_NAME = os.getenv("DATABASE_NAME")
 DATABASE_USERNAME = os.getenv("DATABASE_USERNAME")
 DATABASE_PASSWORD = os.getenv("DATABASE_PASSWORD")
 
-DATABASE_URL = (
-    f"postgresql://{DATABASE_USERNAME}:"
-    f"{quote_plus(DATABASE_PASSWORD)}@"
-    f"{DATABASE_HOSTNAME}:{DATABASE_PORT}/"
-    f"{DATABASE_NAME}"
-)
+if all((DATABASE_HOSTNAME, DATABASE_PORT, DATABASE_NAME, DATABASE_USERNAME, DATABASE_PASSWORD)):
+    DATABASE_URL = (
+        f"postgresql://{DATABASE_USERNAME}:"
+        f"{quote_plus(DATABASE_PASSWORD)}@"
+        f"{DATABASE_HOSTNAME}:{DATABASE_PORT}/"
+        f"{DATABASE_NAME}"
+    )
+else:
+    DATABASE_URL = "sqlite:///./quishshield.db"
 
-engine = create_engine(DATABASE_URL)
+engine_args = {"connect_args": {"check_same_thread": False}} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, **engine_args)
 
 SessionLocal = sessionmaker(
     autocommit=False,

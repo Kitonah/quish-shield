@@ -4,3 +4,9 @@ pydantic
 sqlalchemy
 psycopg2-binary
 python-dotenv
+httpx
+tldextract
+python-whois
+Levenshtein
+playwright
+Pillow

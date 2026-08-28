@@ -14,6 +14,21 @@ class ScanURLRequest(BaseModel):
     url: str
 
 
+class ScanSMSRequest(BaseModel):
+    message: str
+
+
+class QRScanResponse(BaseModel):
+    success: bool
+    found: bool = False
+    type: str | None = None
+    payload: str | None = None
+    raw_data: str | None = None
+    resolved_url: str | None = None
+    is_upi: bool = False
+    error: str | None = None
+
+
 # ---------- Member 6 → Member 1 ----------
 
 class ExtractionResult(BaseModel):

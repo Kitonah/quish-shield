@@ -1,41 +1,64 @@
-import mockScanResult from "../data/mockScan";
-
-
 export async function scanUrl(url) {
-  // Temporary mock.
-  // Later this will call Member 1's central analysis API.
+  const response = await fetch("/api/v1/scan-url", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ url }),
+  });
 
-  await new Promise((resolve) => setTimeout(resolve, 500));
+  if (!response.ok) {
+    let detail = `Scan failed (${response.status})`;
+
+    try {
+      const error = await response.json();
+      detail = error.detail || detail;
+    } catch {
+      // Keep the HTTP status when the server does not return JSON.
+    }
+
+    throw new Error(detail);
+  }
+
+  const result = await response.json();
 
   return {
-    ...mockScanResult,
-    url,
+    ...result,
+    url: result.submitted_url,
+    score: result.threat_score,
+    status: result.status.toLowerCase(),
   };
 }
 
 
 export async function scanQR(file) {
-  // Temporary mock.
-  // Later this will send the image to Member 6's FastAPI backend.
+  const body = new FormData();
+  body.append("file", file);
 
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  const response = await fetch("/api/v1/scan-qr", {
+    method: "POST",
+    body,
+  });
 
-  return {
-    success: true,
-    type: "url",
-    payload: "https://secure-login-example.com",
-  };
+  if (!response.ok) {
+    throw new Error(`QR scan failed (${response.status})`);
+  }
+
+  return response.json();
 }
 
 export async function scanSMS(message) {
-  // Temporary mock.
-  // Later this will send the SMS text to Member 6's FastAPI backend.
+  const response = await fetch("/api/v1/scan-sms", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ message }),
+  });
 
-  await new Promise((resolve) => setTimeout(resolve, 1000));
+  if (!response.ok) {
+    throw new Error(`SMS scan failed (${response.status})`);
+  }
 
-  return {
-    success: true,
-    type: "url",
-    payload: "https://secure-login-example.com",
-  };
+  return response.json();
 }

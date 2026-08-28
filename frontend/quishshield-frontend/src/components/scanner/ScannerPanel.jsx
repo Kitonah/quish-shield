@@ -9,6 +9,7 @@ function ScannerPanel() {
   const [isScanning, setIsScanning] = useState(false);
   const [scannedUrl, setScannedUrl] = useState("");
   const [scanResult, setScanResult] = useState(null);
+  const [scanError, setScanError] = useState("");
 
   const modes = [
     {
@@ -62,24 +63,35 @@ function ScannerPanel() {
       setScanResult(null);
       setScannedUrl("");
       setIsScanning(false);
+      setScanError("");
     }}
   />
 ) : isScanning ? (
   <InspectionProgress
     url={scannedUrl}
     onComplete={async () => {
-      const result = await scanUrl(scannedUrl);
-
-      setIsScanning(false);
-      setScanResult(result);
+      try {
+        const result = await scanUrl(scannedUrl);
+        setScanResult(result);
+      } catch (error) {
+        setScanError(error.message || "Unable to reach the scanning service.");
+      } finally {
+        setIsScanning(false);
+      }
     }}
   />
 ) : (
   <>
+    {scanError && (
+      <div className="mt-3 rounded-xl border border-red-400/20 bg-red-400/5 p-4 text-sm text-red-300">
+        {scanError}
+      </div>
+    )}
     {activeMode === "url" && (
       <UrlScanner
         onScan={(url) => {
           setScannedUrl(url);
+          setScanError("");
           setIsScanning(true);
         }}
       />
@@ -211,13 +223,13 @@ function QRScanner({onScan}) {
   try {
     const result = await scanQR(selectedImage.file);
 
-    if (!result.success) {
-      setQrError("No QR code could be detected in this image.");
+    if (!result.found) {
+      setQrError(result.error || "No QR code could be detected in this image.");
       return;
     }
 
     setQrResult(result);
-  } catch (error) {
+  } catch {
     setQrError("Something went wrong while scanning the QR code.");
   } finally {
     setIsScanning(false);
@@ -315,6 +327,16 @@ function QRScanner({onScan}) {
       This QR code contains a UPI payment request rather than a website URL.
     </p>
   </>
+) : qrResult.type === "text" ? (
+  <>
+    <p className="text-sm font-medium text-slate-300">
+      Plain text detected
+    </p>
+
+    <p className="mt-2 break-all text-sm text-slate-400">
+      {qrResult.payload}
+    </p>
+  </>
 ) : (
   <p className="text-sm text-red-400">
     Unsupported QR payload detected.
@@ -345,7 +367,6 @@ function QRScanner({onScan}) {
 function SMSScanner({ onScan }) {
     const [message, setMessage] = useState("");
 const [isScanning, setIsScanning] = useState(false);
-const [smsResult, setSmsResult] = useState(null);
 const [smsError, setSmsError] = useState("");
 
 async function handleSMSScan() {
@@ -365,9 +386,8 @@ async function handleSMSScan() {
       return;
     }
 
-    setSmsResult(result);
     onScan(result.payload);
-  } catch (error) {
+  } catch {
     setSmsError("Something went wrong while analyzing the SMS.");
   } finally {
     setIsScanning(false);
@@ -383,6 +403,12 @@ async function handleSMSScan() {
   rows={5}
   className="w-full resize-none bg-transparent p-3 text-sm text-white outline-none placeholder:text-slate-600"
 />
+
+      {smsError && (
+        <p className="px-3 pb-3 text-sm text-red-400">
+          {smsError}
+        </p>
+      )}
 
       <div className="flex justify-end border-t border-white/10 pt-3">
         <button

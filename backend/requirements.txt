@@ -5,6 +5,9 @@ sqlalchemy
 psycopg2-binary
 python-dotenv
 httpx
+python-multipart
+requests
+opencv-python
 tldextract
 python-whois
 Levenshtein

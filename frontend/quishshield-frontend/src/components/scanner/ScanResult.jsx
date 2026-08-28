@@ -2,7 +2,8 @@ import { AlertTriangle, CheckCircle, ShieldAlert } from "lucide-react";
 
 function ScanResult({ result, onScanAgain }) {
   const isSafe = result.status === "safe";
-  const isDangerous = result.status === "dangerous";
+  const isDangerous =
+    result.status === "dangerous" || result.status === "critical_phishing";
   let riskLabel;
 let riskColor;
 let riskBg;

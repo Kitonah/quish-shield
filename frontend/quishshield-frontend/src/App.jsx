@@ -1,4 +1,3 @@
-import { useState } from 'react'
 import Navbar from "./components/layout/navbar";
 import Home from "./pages/home";
 

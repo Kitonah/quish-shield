@@ -1,4 +1,4 @@
-import { Link, Search, ShieldCheck } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 import ScannerPanel from "../components/scanner/ScannerPanel";
 function Home() {
   return (

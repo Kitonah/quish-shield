@@ -217,10 +217,21 @@ async def analyze_url(url: str) -> ScanResponse:
         if visual_match.is_visual_spoof
         else 0.0
     )
-    threat_score = round(min(
+    weighted_score = (
         0.45 * heuristics.heuristic_score
         + 0.35 * visual_risk
-        + 0.20 * credential_risk,
+        + 0.20 * credential_risk
+    )
+    evidence_floor = 0.0
+    if heuristics.is_typosquat:
+        evidence_floor = 40.0
+    if snapshot.has_credential_inputs:
+        evidence_floor = max(evidence_floor, 45.0)
+    if visual_match.is_visual_spoof:
+        evidence_floor = max(evidence_floor, 60.0)
+
+    threat_score = round(min(
+        max(weighted_score, evidence_floor),
         100.0,
     ), 1)
 

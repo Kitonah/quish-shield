@@ -1,6 +1,13 @@
-from enum import Enum
-from pydantic import BaseModel, Field
+from __future__ import annotations
 
+from enum import Enum
+from typing import Any, Dict, List, Optional
+from pydantic import BaseModel
+
+
+# ---------------------------------------------------------
+# Enums
+# ---------------------------------------------------------
 
 class ThreatStatus(str, Enum):
     SAFE = "SAFE"
@@ -8,7 +15,9 @@ class ThreatStatus(str, Enum):
     CRITICAL_PHISHING = "CRITICAL_PHISHING"
 
 
-# ---------- Frontend → Member 1 ----------
+# ---------------------------------------------------------
+# Request Schemas
+# ---------------------------------------------------------
 
 class ScanURLRequest(BaseModel):
     url: str
@@ -18,69 +27,64 @@ class ScanSMSRequest(BaseModel):
     message: str
 
 
-class QRScanResponse(BaseModel):
-    success: bool
-    found: bool = False
-    type: str | None = None
-    payload: str | None = None
-    raw_data: str | None = None
-    resolved_url: str | None = None
-    is_upi: bool = False
-    error: str | None = None
-
-
-# ---------- Member 6 → Member 1 ----------
-
-class ExtractionResult(BaseModel):
-    success: bool
-    resolved_url: str | None = None
-    error: str | None = None
-
-
-# ---------- Member 2 → Member 1 ----------
+# ---------------------------------------------------------
+# Sub-module Response Schemas
+# ---------------------------------------------------------
 
 class HeuristicsResult(BaseModel):
-    heuristic_score: float
-    domain_age_days: int | None = None
+    heuristic_score: float = 0.0
+    domain_age_days: Optional[int] = None
     is_typosquat: bool = False
-    target_candidate: str | None = None
-    flags: list[str] = Field(default_factory=list)
+    target_candidate: Optional[str] = None
+    flags: List[str] = []
 
-
-# ---------- Member 3 → Member 1 ----------
 
 class SnapshotResult(BaseModel):
-    success: bool
-    resolved_url: str | None = None
-    screenshot_path: str | None = None
-    redirected: bool = False
-    redirect_chain: list[dict] = Field(default_factory=list)
-    page_description: str | None = None
-    load_time_ms: int = 0
+    success: bool = True
+    resolved_url: Optional[str] = None
+    screenshot_path: Optional[str] = None
     has_credential_inputs: bool = False
-    suspicious_inputs: list[str] = Field(default_factory=list)
-    page_title: str | None = None
-    error: str | None = None
+    is_security_interstitial: bool = False
+    page_title: Optional[str] = None
+    error: Optional[str] = None
 
-
-# ---------- Member 4 → Member 1 ----------
 
 class VisualMatchResult(BaseModel):
-    matched_brand: str | None = None
+    matched_brand: Optional[str] = None
     visual_similarity_score: float = 0.0
     is_visual_spoof: bool = False
-    domain_matches: bool = True
-    detail: str | None = None
-    method: str | None = None
 
 
-# ---------- Member 1 → Frontend ----------
+# ---------------------------------------------------------
+# QR / SMS Extraction Schemas
+# ---------------------------------------------------------
+
+class QRScanResponse(BaseModel):
+    success: bool = True
+    type: Optional[str] = None
+    payload: Optional[str] = None
+    resolved_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+class SMSScanResponse(BaseModel):
+    success: bool = True
+    extracted_urls: List[str] = []
+    primary_url: Optional[str] = None
+    error: Optional[str] = None
+
+
+# ---------------------------------------------------------
+# Central Orchestration Response Schema
+# ---------------------------------------------------------
 
 class ScanResponse(BaseModel):
     scan_id: str
     submitted_url: str
+    source_type: str = "url"
     threat_score: float
-    status: ThreatStatus
-    heuristics: HeuristicsResult
-    snapshot: SnapshotResult
-    visual_match: VisualMatchResult
+    status: str
+    detected_brand: Optional[str] = None
+    heuristics: Optional[HeuristicsResult] = None
+    snapshot: Optional[SnapshotResult] = None
+    visual_match: Optional[VisualMatchResult] = None

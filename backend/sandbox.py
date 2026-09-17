@@ -1,275 +1,86 @@
-"""
-╔══════════════════════════════════════════════════════════════╗
-║  QuiShield — Member 3: Headless Sandbox (sandbox.py)         ║
-║                                                              ║
-║  WHAT THIS FILE DOES (in plain English):                     ║
-║  1. Opens an invisible web browser (you won't see a window). ║
-║  2. Goes to the URL you give it.                             ║
-║  3. Takes a picture (screenshot) of whatever website it      ║
-║     lands on — even if the URL bounced through redirects.    ║
-║  4. Reads the page's code to see if it has suspicious        ║
-║     things like password boxes or OTP fields.                ║
-║  5. Returns all of this info as a neat dictionary so other   ║
-║     parts of QuiShield can use it.                           ║
-╚══════════════════════════════════════════════════════════════╝
-"""
+from __future__ import annotations
 
-import os
-import time
-import uuid
 import asyncio
-from urllib.parse import urlparse
+import os
+import uuid
+from typing import Any, Dict, Optional
 
 from playwright.async_api import async_playwright
 
+SNAPSHOT_DIR = os.path.join(os.path.dirname(__file__), "temp_snapshots")
+os.makedirs(SNAPSHOT_DIR, exist_ok=True)
 
-# ─── Configuration ────────────────────────────────────────────
-SCREENSHOT_DIR = os.path.join(os.path.dirname(__file__), "screenshots")
-os.makedirs(SCREENSHOT_DIR, exist_ok=True)
+# Common platform warning signatures
+INTERSTITIAL_SIGNATURES = [
+    "suspected phishing",
+    "deceptive site ahead",
+    "reported for potential phishing",
+    "phishing attack ahead",
+    "this website has been reported",
+    "account suspended",
+    "dangerous site",
+]
 
-# The size of the "virtual screen" the invisible browser uses.
-VIEWPORT_WIDTH = 1280
-VIEWPORT_HEIGHT = 720
 
-# Maximum seconds to wait for a page to load before giving up.
-PAGE_TIMEOUT_MS = 12_000  # 12 seconds
-
-
-# ─── Helper: detect suspicious form fields ────────────────────
-async def _detect_credential_fields(page) -> dict:
+async def capture_snapshot(url: str) -> Dict[str, Any]:
     """
-    Looks at the page's HTML for form inputs that ask for
-    sensitive information (passwords, OTPs, card numbers, etc.).
-
-    Returns a dictionary like:
-      {
-        "has_password_field": True,
-        "has_otp_field": False,
-        "has_card_field": False,
-        "suspicious_inputs": ["password", "otp", ...]
-      }
+    Launches headless Playwright Chromium to trace redirects, 
+    inspect DOM input elements, and capture a 1280x720 PNG snapshot.
     """
-    # We run JavaScript *inside* the hidden browser page to
-    # inspect the form fields. This is safe — it runs in an
-    # isolated sandbox, not on your real machine.
-    result = await page.evaluate("""
-        () => {
-            const inputs = Array.from(document.querySelectorAll(
-                'input, textarea, select'
-            ));
+    target_url = url if "://" in url else f"https://{url}"
+    screenshot_id = f"{uuid.uuid4().hex}.png"
+    screenshot_path = os.path.join(SNAPSHOT_DIR, screenshot_id)
 
-            const dominated = [];
-
-            inputs.forEach(el => {
-                const type  = (el.getAttribute('type')        || '').toLowerCase();
-                const name  = (el.getAttribute('name')        || '').toLowerCase();
-                const id    = (el.getAttribute('id')          || '').toLowerCase();
-                const ph    = (el.getAttribute('placeholder') || '').toLowerCase();
-                const ac    = (el.getAttribute('autocomplete')|| '').toLowerCase();
-                const blob  = `${type} ${name} ${id} ${ph} ${ac}`;
-                dominated.push(blob);
-            });
-
-            return dominated;
-        }
-    """)
-
-    # Now we check those collected strings for suspicious keywords.
-    password_keywords = ["password", "passwd", "pass", "pwd", "pin"]
-    otp_keywords      = ["otp", "one-time", "verification", "verify", "code", "2fa", "mfa"]
-    card_keywords     = ["card", "cvv", "cvc", "expiry", "credit", "debit"]
-    login_keywords    = ["login", "signin", "sign-in", "log-in", "username", "email",
-                         "user", "userid", "account"]
-
-    found = []
-    flags = {
-        "has_password_field": False,
-        "has_otp_field":      False,
-        "has_card_field":     False,
-        "has_login_field":    False,
-    }
-
-    for blob in result:
-        for kw in password_keywords:
-            if kw in blob:
-                flags["has_password_field"] = True
-                if "password" not in found:
-                    found.append("password")
-        for kw in otp_keywords:
-            if kw in blob:
-                flags["has_otp_field"] = True
-                if "otp" not in found:
-                    found.append("otp")
-        for kw in card_keywords:
-            if kw in blob:
-                flags["has_card_field"] = True
-                if "card" not in found:
-                    found.append("card")
-        for kw in login_keywords:
-            if kw in blob:
-                flags["has_login_field"] = True
-                if "login" not in found:
-                    found.append("login")
-
-    flags["suspicious_inputs"] = found
-    return flags
-
-
-# ─── Helper: extract page metadata ───────────────────────────
-async def _extract_page_meta(page) -> dict:
-    """
-    Grabs the page title and any meta-description tag.
-    """
-    title = await page.title()
-    description = await page.evaluate("""
-        () => {
-            const meta = document.querySelector('meta[name="description"]');
-            return meta ? meta.getAttribute('content') : '';
-        }
-    """)
-    return {"title": title, "description": description}
-
-
-# ─── Main function: capture_snapshot ──────────────────────────
-async def capture_snapshot(url: str) -> dict:
-    """
-    THE MAIN FUNCTION.
-
-    Give it a URL → it returns a dictionary with:
-      - screenshot_path : where the image was saved
-      - final_url       : the URL after all redirects
-      - redirected      : True/False — did the URL bounce?
-      - page_title      : title of the page
-      - page_description: meta description
-      - credential_fields: info about suspicious form fields
-      - load_time_ms    : how long the page took to load
-      - error           : any error message (None if all good)
-
-    HOW TO USE:
-        import asyncio
-        from sandbox import capture_snapshot
-
-        result = asyncio.run(capture_snapshot("https://example.com"))
-        print(result)
-    """
-
-    # Generate a unique filename for the screenshot so we never
-    # overwrite a previous one.
-    snap_id = uuid.uuid4().hex[:10]
-    screenshot_path = os.path.join(SCREENSHOT_DIR, f"snap_{snap_id}.png")
-
-    # Build the result dictionary with safe defaults.
     result = {
-        "snapshot_id":        snap_id,
-        "original_url":       url,
-        "final_url":          url,
-        "redirected":         False,
-        "redirect_chain":     [],
-        "screenshot_path":    screenshot_path,
-        "page_title":         "",
-        "page_description":   "",
-        "credential_fields":  {},
-        "load_time_ms":       0,
-        "error":              None,
+        "success": False,
+        "resolved_url": target_url,
+        "screenshot_path": None,
+        "has_credential_inputs": False,
+        "is_security_interstitial": False,
+        "page_title": None,
+        "error": None,
     }
 
-    # ── Launch the invisible browser ──────────────────────────
-    async with async_playwright() as pw:
-        browser = await pw.chromium.launch(
-            headless=True,           # No visible window
-            args=[
-                "--no-sandbox",
-                "--disable-gpu",
-                "--disable-dev-shm-usage",
-                "--disable-extensions",
-            ],
-        )
-
-        # Create a fresh, isolated "browser tab" (context).
-        context = await browser.new_context(
-            viewport={"width": VIEWPORT_WIDTH, "height": VIEWPORT_HEIGHT},
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/120.0.0.0 Safari/537.36"
-            ),
-            ignore_https_errors=True,   # Don't crash on bad SSL
-        )
-
-        page = await context.new_page()
-
-        # Track redirects: every time the browser bounces to a
-        # new URL, we record it.
-        redirect_chain = []
-
-        def _on_response(response):
-            status = response.status
-            if 300 <= status < 400:
-                redirect_chain.append({
-                    "url":    response.url,
-                    "status": status,
-                })
-
-        page.on("response", _on_response)
-
-        try:
-            start = time.time()
-
-            # Actually navigate to the URL.
-            await page.goto(
-                url,
-                wait_until="domcontentloaded",
-                timeout=PAGE_TIMEOUT_MS,
+    try:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(
+                headless=True,
+                args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
             )
+            context = await browser.new_context(
+                viewport={"width": 1280, "height": 720},
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                ignore_https_errors=True
+            )
+            page = await context.new_page()
 
-            # Wait a tiny bit for JS-heavy pages to finish rendering.
-            await page.wait_for_timeout(1500)
+            # Navigate with 8-second ceiling
+            response = await page.goto(target_url, wait_until="load", timeout=8000)
+            await asyncio.sleep(1.0)  # Allow dynamic scripts to settle
 
-            elapsed_ms = int((time.time() - start) * 1000)
-            result["load_time_ms"] = elapsed_ms
+            result["resolved_url"] = page.url
+            result["page_title"] = await page.title()
 
-            # Where did we actually end up?
-            final_url = page.url
-            result["final_url"]       = final_url
-            result["redirected"]      = (final_url != url)
-            result["redirect_chain"]  = redirect_chain
+            # 1. Inspect DOM text for platform anti-phishing warnings
+            page_text = (await page.content()).lower()
+            if any(sig in page_text for sig in INTERSTITIAL_SIGNATURES):
+                result["is_security_interstitial"] = True
 
-            # Take the screenshot.
+            # 2. Check DOM for password / credential input fields
+            password_inputs = await page.query_selector_all('input[type="password"]')
+            otp_inputs = await page.query_selector_all('input[name*="otp"], input[id*="otp"]')
+            if len(password_inputs) > 0 or len(otp_inputs) > 0:
+                result["has_credential_inputs"] = True
+
+            # 3. Capture Snapshot
             await page.screenshot(path=screenshot_path, full_page=False)
+            result["screenshot_path"] = screenshot_path
+            result["success"] = True
 
-            # Detect credential-harvesting fields.
-            creds = await _detect_credential_fields(page)
-            result["credential_fields"] = creds
-
-            # Grab page metadata.
-            meta = await _extract_page_meta(page)
-            result["page_title"]       = meta["title"]
-            result["page_description"] = meta["description"]
-
-        except Exception as exc:
-            # If anything went wrong (timeout, DNS failure, etc.)
-            # we still return a result — just with the error noted.
-            result["error"] = str(exc)
-
-            # Try to grab a screenshot even on error (might show
-            # the browser's error page, which is still useful).
-            try:
-                await page.screenshot(path=screenshot_path, full_page=False)
-            except Exception:
-                result["screenshot_path"] = None
-
-        finally:
             await context.close()
             await browser.close()
 
+    except Exception as e:
+        result["error"] = str(e)
+
     return result
-
-
-# ─── Quick self-test ──────────────────────────────────────────
-if __name__ == "__main__":
-    import json
-
-    test_url = "https://example.com"
-    print(f"\n🔍 Testing sandbox with: {test_url}\n")
-    output = asyncio.run(capture_snapshot(test_url))
-    print(json.dumps(output, indent=2))

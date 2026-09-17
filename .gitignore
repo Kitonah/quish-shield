@@ -16,3 +16,7 @@ build/
 # Temporary outputs
 temp_snapshots/*.png
 !temp_snapshots/.gitkeep
+
+*.db
+backend/screenshots/
+frontend/package-lock.json

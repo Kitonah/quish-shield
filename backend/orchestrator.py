@@ -1,19 +1,12 @@
-import logging
+from __future__ import annotations
 
-try:
-    from backend.heuristics import inspect_heuristics
-except Exception:
-    inspect_heuristics = None
+import asyncio
+import os
+import uuid
+from typing import Optional
+from urllib.parse import urlparse
 
-try:
-    from backend.sandbox import capture_snapshot
-except Exception:
-    capture_snapshot = None
-
-try:
-    from backend.visual_matcher import BrandVisualMatcher
-except Exception:
-    BrandVisualMatcher = None
+import tldextract
 
 from backend.database import (
     hash_url,
@@ -21,6 +14,7 @@ from backend.database import (
     normalize_url,
     save_or_update_result,
 )
+from backend.heuristics import inspect_heuristics
 from backend.schemas import (
     HeuristicsResult,
     ScanResponse,
@@ -29,241 +23,162 @@ from backend.schemas import (
     VisualMatchResult,
 )
 
-logger = logging.getLogger("quishshield")
-visual_matcher = BrandVisualMatcher() if BrandVisualMatcher else None
+# Canonical domain whitelist per brand to prevent false positives
+BRAND_DOMAINS = {
+    "amazon": ["amazon.in", "amazon.com", "amazon.co.uk", "media-amazon.com"],
+    "google": ["google.com", "google.co.in", "youtube.com", "youtu.be", "accounts.google.com", "gstatic.com"],
+    "hdfc": ["hdfcbank.com", "hdfc.com"],
+    "icici": ["icicibank.com"],
+    "incometax": ["incometax.gov.in", "incometaxindiaefiling.gov.in"],
+    "paytm": ["paytm.com"],
+    "phonepe": ["phonepe.com"],
+    "sbi": ["onlinesbi.sbi", "onlinesbi.com", "sbi.co.in"],
+}
+
+# Top benign ecosystem domains that should never be flagged as visual spoofs
+GLOBAL_TRUSTED_ROOTS = {
+    "youtube.com", "google.com", "amazon.in", "amazon.com", 
+    "flipkart.com", "microsoft.com", "apple.com", "github.com"
+}
 
 
 def _record_to_scan_response(record) -> ScanResponse:
-    """
-    Convert a cached database record into the API's ScanResponse format.
-
-    The current database stores the final verdict and detected brand,
-    but not the complete Member 2/3/4 analysis breakdown. Therefore,
-    cached responses use lightweight placeholders for those sections.
-    """
-
+    """Safely construct a ScanResponse from a cached database record."""
     return ScanResponse(
         scan_id=f"cached-{record.id}",
         submitted_url=record.url,
-        threat_score=record.threat_score,
-        status=ThreatStatus(record.status),
-
+        source_type="url",
+        threat_score=float(record.threat_score or 0.0),
+        status=str(record.status),
+        detected_brand=record.detected_brand,
         heuristics=HeuristicsResult(
-            heuristic_score=0.0,
-            flags=["Detailed analysis unavailable for cached result"],
+            heuristic_score=float(record.threat_score or 0.0),
+            domain_age_days=None,
+            is_typosquat=False,
+            target_candidate=record.detected_brand,
+            flags=["Result served from cache"],
         ),
-
         snapshot=SnapshotResult(
-            success=False,
+            success=True,
             resolved_url=record.url,
-            error="Detailed sandbox result unavailable for cached result",
+            screenshot_path=None,
+            has_credential_inputs=False,
+            page_title=None,
+            error=None,
         ),
-
         visual_match=VisualMatchResult(
             matched_brand=record.detected_brand,
-            detail="Detailed visual match unavailable for cached result",
+            visual_similarity_score=0.0,
+            is_visual_spoof=False,
         ),
     )
 
 
-async def analyze_url(url: str) -> ScanResponse:
-    """
-    Central orchestration pipeline for URL scanning.
+async def analyze_url(raw_url: str) -> ScanResponse:
+    """Central orchestration pipeline connecting Member 2, 3, and 4 engines."""
+    normalized = normalize_url(raw_url)
+    url_hash_val = hash_url(normalized)
 
-    1. Normalize the URL.
-    2. Hash it.
-    3. Check the database cache.
-    4. If found, return the cached result.
-    5. If not found, run Members 2/3/4 analysis.
-    6. Calculate the final threat result.
-    7. Save the result to the database.
-    8. Return ScanResponse.
-    """
-
-    # ---------------------------------------------------------
-    # 1. Normalize and hash URL
-    # ---------------------------------------------------------
-
-    normalized_url = normalize_url(url)
-    url_hash = hash_url(normalized_url)
-
-    # ---------------------------------------------------------
-    # 2. Database lookup
-    # ---------------------------------------------------------
-
-    cached_record = lookup_url(url_hash)
-
+    # 1. Check Database Cache
+    cached_record = lookup_url(url_hash_val)
     if cached_record:
-        logger.info(
-            "CACHE HIT: returning stored result for %s",
-            normalized_url,
-        )
-
         return _record_to_scan_response(cached_record)
 
-    logger.info(
-        "CACHE MISS: running analysis for %s",
-        normalized_url,
-    )
+    # Extract base domain components
+    ext = tldextract.extract(normalized)
+    registered_domain = f"{ext.domain}.{ext.suffix}".lower() if ext.domain and ext.suffix else ""
 
-    # ---------------------------------------------------------
-    # 3. Member 2 - Heuristics / WHOIS / lexical analysis
-    # ---------------------------------------------------------
+    # 2. Member 2: Heuristics & RDAP Forensics
+    heuristics_data = await inspect_heuristics(normalized)
+
+    # 3. Member 3: Headless Sandbox
+    snapshot_data = {
+        "success": True,
+        "resolved_url": normalized,
+        "screenshot_path": None,
+        "has_credential_inputs": False,
+        "page_title": None,
+        "error": None,
+    }
     try:
-        heuristic_data = (
-            await inspect_heuristics(normalized_url)
-            if inspect_heuristics
-            else None
-        )
-        if heuristic_data is None:
-            raise RuntimeError("Heuristic analyzer is unavailable")
-    except Exception as exc:
-        logger.exception("Heuristic scan failed for %s", normalized_url)
-        heuristic_data = {
-            "heuristic_score": 0.0,
-            "domain_age_days": None,
-            "is_typosquat": False,
-            "target_candidate": None,
-            "flags": [f"Heuristic analysis unavailable: {exc}"],
-        }
+        from backend.sandbox import capture_snapshot
+        snap_res = await capture_snapshot(normalized)
+        if snap_res:
+            snapshot_data.update(snap_res)
+    except Exception as e:
+        snapshot_data["error"] = str(e)
 
-    try:
-        heuristics = HeuristicsResult(
-            heuristic_score=heuristic_data.get("heuristic_score", 0.0),
-            domain_age_days=heuristic_data.get("domain_age_days"),
-            is_typosquat=heuristic_data.get("is_typosquat", False),
-            target_candidate=heuristic_data.get("target_candidate"),
-            flags=heuristic_data.get("flags", []),
-        )
-    except Exception as exc:
-        logger.exception("Invalid heuristic result for %s", normalized_url)
-        heuristics = HeuristicsResult(
-            heuristic_score=0.0,
-            flags=[f"Invalid heuristic result: {exc}"],
-        )
+    # 4. Member 4: Computer Vision Matcher
+    visual_data = {
+        "matched_brand": None,
+        "visual_similarity_score": 0.0,
+        "is_visual_spoof": False,
+    }
+    screenshot_path = snapshot_data.get("screenshot_path")
+    if screenshot_path and os.path.exists(screenshot_path):
+        try:
+            from backend.visual_matcher import predict_brand
+            pred_brand, conf = predict_brand(screenshot_path)
+            
+            if pred_brand and pred_brand.lower() != "unknown" and conf >= 85.0:
+                brand_key = pred_brand.lower()
+                allowed_domains = BRAND_DOMAINS.get(brand_key, [])
+                
+                # Verify if current domain is owned by predicted brand
+                is_legit = registered_domain in allowed_domains or any(d in normalized.lower() for d in allowed_domains)
+                
+                visual_data["matched_brand"] = pred_brand
+                visual_data["visual_similarity_score"] = round(conf, 1)
+                visual_data["is_visual_spoof"] = not is_legit
+        except Exception:
+            pass
 
-    # ---------------------------------------------------------
-    # 4. Member 3 - Playwright / sandbox snapshot
-    # ---------------------------------------------------------
-    sandbox_url = normalized_url
-    if not sandbox_url.startswith(("http://", "https://")):
-        sandbox_url = f"http://{sandbox_url}"
+    # 5. Calculate Composite Threat Score
+    h_score = float(heuristics_data.get("heuristic_score", 0.0))
+    is_spoof = visual_data.get("is_visual_spoof", False)
+    has_creds = snapshot_data.get("has_credential_inputs", False)
 
-    try:
-        sandbox_result = (
-            await capture_snapshot(sandbox_url)
-            if capture_snapshot
-            else None
-        )
-        if sandbox_result is None:
-            raise RuntimeError("Sandbox analyzer is unavailable")
-    except Exception as exc:
-        logger.exception("Sandbox scan failed for %s", normalized_url)
-        sandbox_result = {
-            "final_url": sandbox_url,
-            "error": str(exc),
-            "credential_fields": {},
-        }
+    total_score = h_score
+    if is_spoof:
+        total_score += 45.0
+    if has_creds and (h_score > 20 or is_spoof):
+        total_score += 20.0
 
-    credential_fields = sandbox_result.get("credential_fields", {})
+    # Whitelist exemption for genuine verified domains
+    if registered_domain in GLOBAL_TRUSTED_ROOTS or any(registered_domain in v for v in BRAND_DOMAINS.values()):
+        if not heuristics_data.get("is_typosquat"):
+            total_score = min(total_score, 0.0)
+            visual_data["is_visual_spoof"] = False
 
-    snapshot = SnapshotResult(
-        success=sandbox_result.get("error") is None,
-        resolved_url=sandbox_result.get("final_url"),
-        screenshot_path=sandbox_result.get("screenshot_path"),
-        redirected=sandbox_result.get("redirected", False),
-        redirect_chain=sandbox_result.get("redirect_chain", []),
-        page_description=sandbox_result.get("page_description"),
-        load_time_ms=sandbox_result.get("load_time_ms", 0),
-        has_credential_inputs=(
-            credential_fields.get("has_password_field", False)
-            or credential_fields.get("has_otp_field", False)
-            or credential_fields.get("has_card_field", False)
-            or credential_fields.get("has_login_field", False)
-        ),
-        suspicious_inputs=credential_fields.get("suspicious_inputs", []),
-        page_title=sandbox_result.get("page_title", ""),
-        error=sandbox_result.get("error"),
-    )
+    final_score = min(round(total_score, 1), 100.0)
 
-    # ---------------------------------------------------------
-    # 5. Member 4 - Visual brand matching
-    # ---------------------------------------------------------
-    try:
-        match_result = visual_matcher.compare_snapshot(
-            screenshot_path=snapshot.screenshot_path,
-            final_url=snapshot.resolved_url or sandbox_url,
-            page_title=snapshot.page_title or "",
-        ) if visual_matcher else None
-    except Exception as exc:
-        logger.exception("Visual matching failed for %s", normalized_url)
-        match_result = None
-
-    visual_match = VisualMatchResult(
-        matched_brand=match_result.matched_brand if match_result else None,
-        visual_similarity_score=(match_result.confidence * 100) if match_result else 0.0,
-        is_visual_spoof=match_result.is_spoof if match_result else False,
-        domain_matches=match_result.domain_matches if match_result else True,
-        detail=(match_result.detail if match_result else "Visual analysis unavailable."),
-        method=match_result.method if match_result else None,
-    )
-
-    # ---------------------------------------------------------
-    # 6. Temporary threat scoring
-    # ---------------------------------------------------------
-    credential_risk = 100.0 if snapshot.has_credential_inputs else 0.0
-    visual_risk = (
-        visual_match.visual_similarity_score
-        if visual_match.is_visual_spoof
-        else 0.0
-    )
-    weighted_score = (
-        0.45 * heuristics.heuristic_score
-        + 0.35 * visual_risk
-        + 0.20 * credential_risk
-    )
-    evidence_floor = 0.0
-    if heuristics.is_typosquat:
-        evidence_floor = 40.0
-    if snapshot.has_credential_inputs:
-        evidence_floor = max(evidence_floor, 45.0)
-    if visual_match.is_visual_spoof:
-        evidence_floor = max(evidence_floor, 60.0)
-
-    threat_score = round(min(
-        max(weighted_score, evidence_floor),
-        100.0,
-    ), 1)
-
-    if threat_score >= 60:
-        status = ThreatStatus.CRITICAL_PHISHING
-    elif threat_score >= 30:
-        status = ThreatStatus.SUSPICIOUS
+    # 6. Assign Verdict
+    if final_score >= 70.0 or visual_data.get("is_visual_spoof"):
+        status_enum = ThreatStatus.CRITICAL_PHISHING
+    elif final_score >= 30.0:
+        status_enum = ThreatStatus.SUSPICIOUS
     else:
-        status = ThreatStatus.SAFE
+        status_enum = ThreatStatus.SAFE
 
-    # ---------------------------------------------------------
-    # 7. Save result to database
-    # ---------------------------------------------------------
+    detected_brand = visual_data.get("matched_brand") or heuristics_data.get("target_candidate")
 
-    record = save_or_update_result(
-        url=normalized_url,
-        url_hash=url_hash,
-        status=status.value,
-        threat_score=threat_score,
-        detected_brand=visual_match.matched_brand,
+    # 7. Persist to Database
+    saved_record = save_or_update_result(
+        url=normalized,
+        url_hash=url_hash_val,
+        status=status_enum.value,
+        threat_score=final_score,
+        detected_brand=detected_brand,
     )
-
-    # ---------------------------------------------------------
-    # 8. Return final API response
-    # ---------------------------------------------------------
 
     return ScanResponse(
-        scan_id=f"scan-{record.id}",
-        submitted_url=url,
-        threat_score=threat_score,
-        status=status,
-        heuristics=heuristics,
-        snapshot=snapshot,
-        visual_match=visual_match,
+        scan_id=f"scan-{saved_record.id if saved_record else uuid.uuid4().hex[:6]}",
+        submitted_url=normalized,
+        source_type="url",
+        threat_score=final_score,
+        status=status_enum.value,
+        detected_brand=detected_brand,
+        heuristics=HeuristicsResult(**heuristics_data),
+        snapshot=SnapshotResult(**snapshot_data),
+        visual_match=VisualMatchResult(**visual_data),
     )

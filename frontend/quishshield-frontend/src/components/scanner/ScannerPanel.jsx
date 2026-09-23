@@ -1,425 +1,296 @@
-import { Image, Link, MessageSquare, Upload } from "lucide-react";
-import { useState } from "react";
-import InspectionProgress from "./InspectionProgress";
-import ScanResult from "./ScanResult";
-import { scanQR, scanUrl, scanSMS } from "../../services/scanner";
+import { useState, useRef } from "react";
+import { Link2, QrCode, MessageSquare, Upload, ArrowRight, ShieldCheck } from "lucide-react";
+import { scanUrl, scanQR, scanSMS } from "../../services/scanner";
 
-function ScannerPanel() {
-  const [activeMode, setActiveMode] = useState("url");
-  const [isScanning, setIsScanning] = useState(false);
-  const [scannedUrl, setScannedUrl] = useState("");
-  const [scanResult, setScanResult] = useState(null);
-  const [scanError, setScanError] = useState("");
+function ScannerPanel(props) {
+  // Find any function prop passed by parent (onScan, onScanUrl, handleSubmit, etc.)
+  const possibleCallback =
+    props.onScan ||
+    props.onScanSubmit ||
+    props.onScanUrl ||
+    props.onSubmit ||
+    props.handleScan ||
+    Object.values(props).find((val) => typeof val === "function");
 
-  const modes = [
-    {
-      id: "url",
-      label: "URL",
-      icon: Link,
-    },
-    {
-      id: "qr",
-      label: "QR Code",
-      icon: Image,
-    },
-    {
-      id: "sms",
-      label: "SMS",
-      icon: MessageSquare,
-    },
-  ];
+  const [activeTab, setActiveTab] = useState("url");
+  const [urlInput, setUrlInput] = useState("");
+  const [smsInput, setSmsInput] = useState("");
+  const [qrFile, setQrFile] = useState(null);
+  const [qrPreview, setQrPreview] = useState(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const [localLoading, setLocalLoading] = useState(false);
+  const [error, setError] = useState("");
+  const fileInputRef = useRef(null);
 
-  return (
-    <div className="mt-10 w-full max-w-3xl">
+  const isLoading = props.loading || localLoading;
 
-      {/* Scanner modes */}
-      <div className="flex rounded-xl border border-white/10 bg-white/5 p-1">
-        {modes.map((mode) => {
-          const Icon = mode.icon;
-          const isActive = activeMode === mode.id;
-
-          return (
-            <button
-              key={mode.id}
-              onClick={() => setActiveMode(mode.id)}
-              className={`flex flex-1 items-center justify-center gap-2 rounded-lg px-4 py-3 text-sm font-medium transition ${
-                isActive
-                  ? "bg-white/10 text-white shadow-sm"
-                  : "text-slate-400 hover:text-white"
-              }`}
-            >
-              <Icon size={17} />
-              {mode.label}
-            </button>
-          );
-        })}
-      </div>
-
-    {/* Scanner content */}
-{scanResult ? (
-  <ScanResult
-    result={scanResult}
-    onScanAgain={() => {
-      setScanResult(null);
-      setScannedUrl("");
-      setIsScanning(false);
-      setScanError("");
-    }}
-  />
-) : isScanning ? (
-  <InspectionProgress
-    url={scannedUrl}
-    onComplete={async () => {
-      try {
-        const result = await scanUrl(scannedUrl);
-        setScanResult(result);
-      } catch (error) {
-        setScanError(error.message || "Unable to reach the scanning service.");
-      } finally {
-        setIsScanning(false);
-      }
-    }}
-  />
-) : (
-  <>
-    {scanError && (
-      <div className="mt-3 rounded-xl border border-red-400/20 bg-red-400/5 p-4 text-sm text-red-300">
-        {scanError}
-      </div>
-    )}
-    {activeMode === "url" && (
-      <UrlScanner
-        onScan={(url) => {
-          setScannedUrl(url);
-          setScanError("");
-          setIsScanning(true);
-        }}
-      />
-    )}
-
-    {activeMode === "qr" && (
-      <QRScanner
-        onScan={(url) => {
-          setScannedUrl(url);
-          setIsScanning(true);
-          setScanResult(null);
-        }}
-      />
-    )}
-
-    {activeMode === "sms" && (
-  <SMSScanner
-    onScan={(url) => {
-      setScannedUrl(url);
-      setIsScanning(true);
-      setScanResult(null);
-    }}
-  />
-)}
-  </>
-)}
-      {/* Supported formats */}
-      <p className="mt-4 text-center text-xs text-slate-600">
-        Analyze URLs, QR codes, and suspicious SMS messages
-      </p>
-    </div>
-  );
-}
-
-
-/* -------------------------------- */
-/* URL Scanner                      */
-/* -------------------------------- */
-
-function UrlScanner({ onScan }) {
-    const [url, setUrl] = useState("");
-
-  function handleScan() {
-    if (!url.trim()) {
+  const dispatchScan = async (url) => {
+    if (typeof possibleCallback === "function") {
+      possibleCallback(url);
       return;
     }
 
-    onScan(url);
-  }
+    // Direct fallback if parent did not wire up a handler
+    try {
+      setLocalLoading(true);
+      await scanUrl(url);
+    } catch (err) {
+      setError(err.message || "Failed to analyze target URL.");
+    } finally {
+      setLocalLoading(false);
+    }
+  };
+
+  const handleUrlSubmit = (e) => {
+    e.preventDefault();
+    if (!urlInput.trim()) {
+      setError("Please enter a valid URL to analyze.");
+      return;
+    }
+    setError("");
+    dispatchScan(urlInput.trim());
+  };
+
+  const handleSmsSubmit = async (e) => {
+    e.preventDefault();
+    if (!smsInput.trim()) {
+      setError("Please enter SMS body text.");
+      return;
+    }
+    setError("");
+    setLocalLoading(true);
+    try {
+      const res = await scanSMS(smsInput.trim());
+      const target = res.payload || (res.extracted_urls && res.extracted_urls[0]);
+      if (!target) {
+        setError(res.error || "No links detected inside this SMS message.");
+        return;
+      }
+      dispatchScan(target);
+    } catch (err) {
+      setError(err.message || "Failed to analyze SMS.");
+    } finally {
+      setLocalLoading(false);
+    }
+  };
+
+  const handleFileSelect = (file) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setError("Please select a valid image file (PNG, JPG, WEBP).");
+      return;
+    }
+    setError("");
+    setQrFile(file);
+    const reader = new FileReader();
+    reader.onload = (e) => setQrPreview(e.target.result);
+    reader.readAsDataURL(file);
+  };
+
+  const handleQrSubmit = async () => {
+    if (!qrFile) {
+      setError("Please upload an image containing a QR code.");
+      return;
+    }
+    setError("");
+    setLocalLoading(true);
+    try {
+      const res = await scanQR(qrFile);
+      if (!res.found && !res.success) {
+        setError(res.error || "No QR code could be detected in this image.");
+        return;
+      }
+
+      const targetPayload = res.resolved_url || res.payload || res.raw_data;
+      if (!targetPayload) {
+        setError("QR code contained no decodable content.");
+        return;
+      }
+
+      dispatchScan(targetPayload);
+    } catch (err) {
+      setError(err.message || "Failed to communicate with QR scanning service.");
+    } finally {
+      setLocalLoading(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFileSelect(e.dataTransfer.files[0]);
+    }
+  };
+
   return (
-    <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-2 shadow-2xl shadow-purple-950/20 backdrop-blur-sm">
-      <div className="flex flex-col gap-3 sm:flex-row">
-
-        <div className="flex flex-1 items-center gap-3 px-4">
-          <Link size={20} className="shrink-0 text-slate-500" />
-
-          <input
-            type="url"
-            value={url}
-            onChange={(event) => setUrl(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter") {
-                handleScan();
-              }
-            }}
-            placeholder="Paste a suspicious URL..."
-            className="w-full bg-transparent py-3 text-white outline-none placeholder:text-slate-600"
-          />
-        </div>
-
-        <button onClick={handleScan}className="rounded-xl bg-gradient-to-r from-purple-500 to-pink-500 px-6 py-3 font-medium text-white transition hover:scale-[1.02] hover:shadow-lg hover:shadow-purple-500/20">
-          Scan URL
+    <div className="w-full max-w-3xl mx-auto rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur-xl shadow-2xl">
+      {/* Vector Navigation Tabs */}
+      <div className="flex rounded-2xl bg-black/40 p-1.5 border border-white/5 mb-6">
+        <button
+          onClick={() => { setActiveTab("url"); setError(""); }}
+          className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-medium transition-all ${
+            activeTab === "url"
+              ? "bg-white/15 text-white shadow-lg border border-white/10"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          <Link2 size={18} />
+          URL Scan
         </button>
 
+        <button
+          onClick={() => { setActiveTab("qr"); setError(""); }}
+          className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-medium transition-all ${
+            activeTab === "qr"
+              ? "bg-white/15 text-white shadow-lg border border-white/10"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          <QrCode size={18} />
+          QR Code
+        </button>
+
+        <button
+          onClick={() => { setActiveTab("sms"); setError(""); }}
+          className={`flex-1 flex items-center justify-center gap-2 py-3 rounded-xl text-sm font-medium transition-all ${
+            activeTab === "sms"
+              ? "bg-white/15 text-white shadow-lg border border-white/10"
+              : "text-slate-400 hover:text-slate-200"
+          }`}
+        >
+          <MessageSquare size={18} />
+          SMS Smishing
+        </button>
       </div>
-    </div>
-  );
-}
 
-
-/* -------------------------------- */
-/* QR Scanner                       */
-/* -------------------------------- */
-
-function QRScanner({onScan}) {
-  const [selectedImage, setSelectedImage] = useState(null);
-  const [qrResult, setQrResult] = useState(null);
-  const [isScanning, setIsScanning] = useState(false);
-  const [qrError, setQrError] = useState("");
-
-  function handleImageChange(event) {
-    const file = event.target.files[0];
-
-    if (!file) {
-      return;
-    }
-    if (selectedImage) {
-  URL.revokeObjectURL(selectedImage.preview);
-}
-
-    setSelectedImage({
-      file,
-      preview: URL.createObjectURL(file),
-    });
-
-    setQrResult(null);
-    setQrError("");
-  }
-
-  function handleReset() {
-  if (selectedImage) {
-    URL.revokeObjectURL(selectedImage.preview);
-  }
-
-  setSelectedImage(null);
-  setQrResult(null);
-  setQrError("");
-  setIsScanning(false);
-}
-
-  async function handleQRScan() {
-  if (!selectedImage) {
-    return;
-  }
-
-  setIsScanning(true);
-  setQrError("");
-
-  try {
-    const result = await scanQR(selectedImage.file);
-
-    if (!result.found) {
-      setQrError(result.error || "No QR code could be detected in this image.");
-      return;
-    }
-
-    setQrResult(result);
-  } catch {
-    setQrError("Something went wrong while scanning the QR code.");
-  } finally {
-    setIsScanning(false);
-  }
-}
-
-  return (
-    <div className="mt-3 rounded-2xl border border-dashed border-white/15 bg-white/5 p-8 text-center backdrop-blur-sm">
-
-      {!selectedImage ? (
-        <>
-          <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-xl bg-purple-500/10 text-purple-400">
-            <Upload size={22} />
-          </div>
-
-          <h3 className="font-medium text-white">
-            Upload a QR code
-          </h3>
-
-          <p className="mt-2 text-sm text-slate-500">
-            Choose an image containing a QR code
-          </p>
-
-          <label className="mt-5 inline-block cursor-pointer rounded-lg border border-white/10 bg-white/5 px-4 py-2 text-sm text-slate-300 transition hover:bg-white/10 hover:text-white">
-            Choose Image
-
+      {/* Vector Form: URL Scan */}
+      {activeTab === "url" && (
+        <form onSubmit={handleUrlSubmit} className="space-y-4">
+          <div className="relative flex items-center">
             <input
+              type="text"
+              value={urlInput}
+              onChange={(e) => setUrlInput(e.target.value)}
+              placeholder="Paste suspicious target URL (e.g. https://...)"
+              className="w-full rounded-2xl border border-white/10 bg-black/40 px-5 py-4 pl-12 text-sm text-white placeholder-slate-500 focus:border-purple-500/50 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition"
+            />
+            <Link2 className="absolute left-4 text-slate-500" size={18} />
+            <button
+              type="submit"
+              disabled={isLoading}
+              className="absolute right-2 rounded-xl bg-gradient-to-r from-purple-500 to-pink-500 px-5 py-2.5 text-sm font-semibold text-white shadow-md hover:opacity-90 transition disabled:opacity-50"
+            >
+              {isLoading ? "Analyzing..." : "Scan URL"}
+            </button>
+          </div>
+        </form>
+      )}
+
+      {/* Vector Form: QR Code Scan */}
+      {activeTab === "qr" && (
+        <div className="space-y-4">
+          <div
+            onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+            onDragLeave={() => setIsDragging(false)}
+            onDrop={handleDrop}
+            onClick={() => fileInputRef.current?.click()}
+            className={`flex flex-col items-center justify-center rounded-2xl border-2 border-dashed p-8 cursor-pointer transition ${
+              isDragging
+                ? "border-purple-500 bg-purple-500/10"
+                : "border-white/10 bg-black/20 hover:border-white/20"
+            }`}
+          >
+            <input
+              ref={fileInputRef}
               type="file"
               accept="image/*"
-              onChange={handleImageChange}
               className="hidden"
+              onChange={(e) => handleFileSelect(e.target.files?.[0])}
             />
-          </label>
-        </>
-      ) : (
-        <>
-          <h3 className="font-medium text-white">
-            QR image selected
-          </h3>
 
-          <div className="mt-5 flex justify-center">
-            <img
-              src={selectedImage.preview}
-              alt="Selected QR code"
-              className="max-h-64 max-w-full rounded-xl border border-white/10 object-contain"
-            />
+            {qrPreview ? (
+              <div className="flex flex-col items-center gap-3">
+                <img
+                  src={qrPreview}
+                  alt="QR Preview"
+                  className="h-44 w-44 rounded-xl object-contain border border-white/10 bg-white p-2"
+                />
+                <span className="text-xs text-slate-400">Click or drop to replace image</span>
+              </div>
+            ) : (
+              <div className="flex flex-col items-center gap-3 text-center">
+                <div className="flex h-12 w-12 items-center justify-center rounded-full bg-white/5 border border-white/10">
+                  <Upload className="text-slate-400" size={20} />
+                </div>
+                <div>
+                  <p className="text-sm font-medium text-slate-200">
+                    Click to upload or drag & drop QR image
+                  </p>
+                  <p className="text-xs text-slate-500 mt-1">
+                    Supports PNG, JPG, or Screenshots
+                  </p>
+                </div>
+              </div>
+            )}
           </div>
-        {qrError && (
-  <p className="mt-4 text-sm text-red-400">
-    {qrError}
-  </p>
-)}
-          {!qrResult && (
-            
+
+          {qrFile && (
             <button
-              onClick={handleQRScan}
-              disabled={isScanning}
-              className="mt-5 rounded-xl bg-gradient-to-r from-purple-500 to-pink-500 px-5 py-2.5 text-sm font-medium text-white transition hover:scale-[1.02] hover:shadow-lg hover:shadow-purple-500/20 disabled:cursor-not-allowed disabled:opacity-50"
+              onClick={handleQrSubmit}
+              disabled={isLoading}
+              className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-500 to-pink-500 py-3.5 text-sm font-semibold text-white shadow-lg hover:opacity-90 transition disabled:opacity-50"
             >
-              {isScanning ? "Scanning QR..." : "Scan QR Code"}
+              {isLoading ? "Decoding & Inspecting..." : "Scan Decoded QR Code"}
+              <ArrowRight size={16} />
             </button>
           )}
-
-          {qrResult && (
-            <div className="mt-6 rounded-xl border border-green-400/10 bg-green-400/5 p-4 text-left">
-
-              {qrResult.type === "url" ? (
-  <>
-    <p className="text-sm font-medium text-green-300">
-      URL detected
-    </p>
-
-    <p className="mt-2 break-all text-sm text-slate-400">
-      {qrResult.payload}
-    </p>
-
-    <button
-      onClick={() => onScan(qrResult.payload)}
-      className="mt-4 w-full rounded-xl bg-gradient-to-r from-purple-500 to-pink-500 px-5 py-2.5 text-sm font-medium text-white transition hover:scale-[1.02]"
-    >
-      Analyze URL
-    </button>
-  </>
-) : qrResult.type === "upi" ? (
-  <>
-    <p className="text-sm font-medium text-yellow-300">
-      UPI payment code detected
-    </p>
-
-    <p className="mt-2 break-all text-sm text-slate-400">
-      {qrResult.payload}
-    </p>
-
-    <p className="mt-3 text-xs text-slate-500">
-      This QR code contains a UPI payment request rather than a website URL.
-    </p>
-  </>
-) : qrResult.type === "text" ? (
-  <>
-    <p className="text-sm font-medium text-slate-300">
-      Plain text detected
-    </p>
-
-    <p className="mt-2 break-all text-sm text-slate-400">
-      {qrResult.payload}
-    </p>
-  </>
-) : (
-  <p className="text-sm text-red-400">
-    Unsupported QR payload detected.
-  </p>
-)}
-
-<button
-  onClick={handleReset}
-  className="mt-4 w-full rounded-xl border border-white/10 bg-white/5 px-5 py-2.5 text-sm font-medium text-slate-300 transition hover:bg-white/10 hover:text-white"
->
-  Choose another image
-</button>
-
-            </div>
-          )}
-        </>
+        </div>
       )}
 
-    </div>
-  );
-}
-
-
-/* -------------------------------- */
-/* SMS Scanner                      */
-/* -------------------------------- */
-
-function SMSScanner({ onScan }) {
-    const [message, setMessage] = useState("");
-const [isScanning, setIsScanning] = useState(false);
-const [smsError, setSmsError] = useState("");
-
-async function handleSMSScan() {
-  if (!message.trim()) {
-    setSmsError("Please enter an SMS message.");
-    return;
-  }
-
-  setIsScanning(true);
-  setSmsError("");
-
-  try {
-    const result = await scanSMS(message);
-
-    if (!result.success) {
-      setSmsError("No suspicious link could be detected in this message.");
-      return;
-    }
-
-    onScan(result.payload);
-  } catch {
-    setSmsError("Something went wrong while analyzing the SMS.");
-  } finally {
-    setIsScanning(false);
-  }
-}
-  return (
-    <div className="mt-3 rounded-2xl border border-white/10 bg-white/5 p-3 backdrop-blur-sm">
-
-      <textarea
-  value={message}
-  onChange={(event) => setMessage(event.target.value)}
-  placeholder="Paste the suspicious SMS message here..."
-  rows={5}
-  className="w-full resize-none bg-transparent p-3 text-sm text-white outline-none placeholder:text-slate-600"
-/>
-
-      {smsError && (
-        <p className="px-3 pb-3 text-sm text-red-400">
-          {smsError}
-        </p>
+      {/* Vector Form: SMS Smishing */}
+      {activeTab === "sms" && (
+        <form onSubmit={handleSmsSubmit} className="space-y-4">
+          <textarea
+            value={smsInput}
+            onChange={(e) => setSmsInput(e.target.value)}
+            rows={4}
+            placeholder="Paste raw SMS message text containing hyperlinks or KYC warnings..."
+            className="w-full rounded-2xl border border-white/10 bg-black/40 p-4 text-sm text-white placeholder-slate-500 focus:border-purple-500/50 focus:outline-none focus:ring-2 focus:ring-purple-500/20 transition resize-none"
+          />
+          <button
+            type="submit"
+            disabled={isLoading}
+            className="w-full flex items-center justify-center gap-2 rounded-xl bg-gradient-to-r from-purple-500 to-pink-500 py-3.5 text-sm font-semibold text-white shadow-lg hover:opacity-90 transition disabled:opacity-50"
+          >
+            {isLoading ? "Parsing SMS..." : "Extract & Analyze Smishing Link"}
+            <ArrowRight size={16} />
+          </button>
+        </form>
       )}
 
-      <div className="flex justify-end border-t border-white/10 pt-3">
-        <button
-  onClick={handleSMSScan}
-  disabled={isScanning}
-  className="rounded-xl bg-gradient-to-r from-purple-500 to-pink-500 px-5 py-2.5 text-sm font-medium text-white transition hover:scale-[1.02] hover:shadow-lg hover:shadow-purple-500/20 disabled:cursor-not-allowed disabled:opacity-50"
->
-  {isScanning ? "Scanning SMS..." : "Inspect SMS"}
-</button>
+      {/* Error Banner */}
+      {error && (
+        <div className="mt-4 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-center text-xs text-red-400">
+          {error}
+        </div>
+      )}
+
+      {/* Feature Indicators */}
+      <div className="mt-6 flex items-center justify-center gap-6 border-t border-white/5 pt-4 text-xs text-slate-500">
+        <span className="flex items-center gap-1.5">
+          <ShieldCheck size={14} className="text-green-400" />
+          Multi-Vector Forensics
+        </span>
+        <span className="flex items-center gap-1.5">
+          <ShieldCheck size={14} className="text-purple-400" />
+          Stealth Sandbox
+        </span>
+        <span className="flex items-center gap-1.5">
+          <ShieldCheck size={14} className="text-pink-400" />
+          Brand Vision AI
+        </span>
       </div>
-
     </div>
   );
 }

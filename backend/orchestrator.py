@@ -3,8 +3,7 @@ from __future__ import annotations
 import asyncio
 import os
 import uuid
-from typing import Optional
-from urllib.parse import urlparse
+from typing import Any, Dict
 
 import tldextract
 
@@ -15,6 +14,7 @@ from backend.database import (
     save_or_update_result,
 )
 from backend.heuristics import inspect_heuristics
+from backend.sandbox import capture_snapshot
 from backend.schemas import (
     HeuristicsResult,
     ScanResponse,
@@ -22,60 +22,58 @@ from backend.schemas import (
     ThreatStatus,
     VisualMatchResult,
 )
+from backend.visual_matcher import compare_snapshot
 
-# Canonical domain whitelist per brand to prevent false positives
-BRAND_DOMAINS = {
-    "amazon": ["amazon.in", "amazon.com", "amazon.co.uk", "media-amazon.com"],
-    "google": ["google.com", "google.co.in", "youtube.com", "youtu.be", "accounts.google.com", "gstatic.com"],
-    "hdfc": ["hdfcbank.com", "hdfc.com"],
-    "icici": ["icicibank.com"],
-    "incometax": ["incometax.gov.in", "incometaxindiaefiling.gov.in"],
-    "paytm": ["paytm.com"],
-    "phonepe": ["phonepe.com"],
-    "sbi": ["onlinesbi.sbi", "onlinesbi.com", "sbi.co.in"],
-}
-
-# Top benign ecosystem domains that should never be flagged as visual spoofs
+# Root domains that are verified legitimate ecosystems
 GLOBAL_TRUSTED_ROOTS = {
-    "youtube.com", "google.com", "amazon.in", "amazon.com", 
-    "flipkart.com", "microsoft.com", "apple.com", "github.com"
+    "youtube.com", "google.com", "google.co.in", 
+    "amazon.in", "amazon.com", "media-amazon.com",
+    "flipkart.com", "microsoft.com", "apple.com", "github.com",
+    "onlinesbi.sbi", "sbi.co.in", "hdfcbank.com", "icicibank.com",
+    "paytm.com", "phonepe.com", "incometax.gov.in"
 }
 
 
 def _record_to_scan_response(record) -> ScanResponse:
-    """Safely construct a ScanResponse from a cached database record."""
+    """Safely constructs a ScanResponse from a cached database record without schema errors."""
+    threat_score = float(record.threat_score or 0.0)
+    
     return ScanResponse(
         scan_id=f"cached-{record.id}",
         submitted_url=record.url,
         source_type="url",
-        threat_score=float(record.threat_score or 0.0),
+        threat_score=threat_score,
         status=str(record.status),
         detected_brand=record.detected_brand,
         heuristics=HeuristicsResult(
-            heuristic_score=float(record.threat_score or 0.0),
+            heuristic_score=threat_score,
             domain_age_days=None,
             is_typosquat=False,
             target_candidate=record.detected_brand,
-            flags=["Result served from cache"],
+            entropy=0.0,
+            flags=["Result served from indexed SHA-256 database cache"],
         ),
         snapshot=SnapshotResult(
             success=True,
             resolved_url=record.url,
             screenshot_path=None,
             has_credential_inputs=False,
+            is_security_interstitial=False,
             page_title=None,
+            load_time_ms=0.0,
             error=None,
         ),
         visual_match=VisualMatchResult(
             matched_brand=record.detected_brand,
             visual_similarity_score=0.0,
             is_visual_spoof=False,
+            detection_method="database_cache",
+            explanation="Record retrieved from pre-computed scan history.",
         ),
     )
 
 
 async def analyze_url(raw_url: str) -> ScanResponse:
-    """Central orchestration pipeline connecting Member 2, 3, and 4 engines."""
     normalized = normalize_url(raw_url)
     url_hash_val = hash_url(normalized)
 
@@ -84,75 +82,70 @@ async def analyze_url(raw_url: str) -> ScanResponse:
     if cached_record:
         return _record_to_scan_response(cached_record)
 
-    # Extract base domain components
     ext = tldextract.extract(normalized)
     registered_domain = f"{ext.domain}.{ext.suffix}".lower() if ext.domain and ext.suffix else ""
 
-    # 2. Member 2: Heuristics & RDAP Forensics
-    heuristics_data = await inspect_heuristics(normalized)
+    # 2. Concurrently run Network Forensics and Isolated Sandbox
+    heuristics_task = inspect_heuristics(normalized)
+    sandbox_task = capture_snapshot(normalized)
 
-    # 3. Member 3: Headless Sandbox
-    snapshot_data = {
-        "success": True,
-        "resolved_url": normalized,
-        "screenshot_path": None,
-        "has_credential_inputs": False,
-        "page_title": None,
-        "error": None,
-    }
-    try:
-        from backend.sandbox import capture_snapshot
-        snap_res = await capture_snapshot(normalized)
-        if snap_res:
-            snapshot_data.update(snap_res)
-    except Exception as e:
-        snapshot_data["error"] = str(e)
+    heuristics_data, snapshot_data = await asyncio.gather(heuristics_task, sandbox_task)
 
-    # 4. Member 4: Computer Vision Matcher
-    visual_data = {
-        "matched_brand": None,
-        "visual_similarity_score": 0.0,
-        "is_visual_spoof": False,
-    }
+    resolved_destination = snapshot_data.get("resolved_url") or normalized
+    page_title = snapshot_data.get("page_title") or ""
     screenshot_path = snapshot_data.get("screenshot_path")
-    if screenshot_path and os.path.exists(screenshot_path):
-        try:
-            from backend.visual_matcher import predict_brand
-            pred_brand, conf = predict_brand(screenshot_path)
-            
-            if pred_brand and pred_brand.lower() != "unknown" and conf >= 85.0:
-                brand_key = pred_brand.lower()
-                allowed_domains = BRAND_DOMAINS.get(brand_key, [])
-                
-                # Verify if current domain is owned by predicted brand
-                is_legit = registered_domain in allowed_domains or any(d in normalized.lower() for d in allowed_domains)
-                
-                visual_data["matched_brand"] = pred_brand
-                visual_data["visual_similarity_score"] = round(conf, 1)
-                visual_data["is_visual_spoof"] = not is_legit
-        except Exception:
-            pass
 
-    # 5. Calculate Composite Threat Score
+    # 3. Visual AI & Brand Verification
+    match_result = compare_snapshot(
+        screenshot_path=screenshot_path,
+        final_url=resolved_destination,
+        page_title=page_title,
+    )
+
+    visual_data: Dict[str, Any] = {
+        "matched_brand": match_result.matched_brand,
+        "visual_similarity_score": round(match_result.confidence * 100.0, 1),
+        "is_visual_spoof": match_result.is_spoof,
+        "detection_method": match_result.method,
+        "explanation": match_result.detail,
+    }
+
+    # 4. Multi-Vector Composite Threat Calculation
     h_score = float(heuristics_data.get("heuristic_score", 0.0))
     is_spoof = visual_data.get("is_visual_spoof", False)
     has_creds = snapshot_data.get("has_credential_inputs", False)
+    is_interstitial = snapshot_data.get("is_security_interstitial", False)
+    has_sandbox_error = bool(snapshot_data.get("error"))
 
     total_score = h_score
+
+    # Visual brand clone detection
     if is_spoof:
         total_score += 45.0
-    if has_creds and (h_score > 20 or is_spoof):
-        total_score += 20.0
 
-    # Whitelist exemption for genuine verified domains
-    if registered_domain in GLOBAL_TRUSTED_ROOTS or any(registered_domain in v for v in BRAND_DOMAINS.values()):
-        if not heuristics_data.get("is_typosquat"):
-            total_score = min(total_score, 0.0)
-            visual_data["is_visual_spoof"] = False
+    # Active credential harvesting fields
+    if has_creds:
+        total_score += 25.0
+
+    # Distinguish active takedown warnings from dead DNS resolution failures
+    if is_interstitial:
+        if has_sandbox_error:
+            # Domain failed to connect or dropped connection
+            total_score += 30.0
+            heuristics_data["flags"].append("Host dropped connection or failed DNS resolution")
+        else:
+            # Active platform takedown banner rendered on-screen
+            total_score += 65.0
+            heuristics_data["flags"].append("Platform warning interstitial detected (Deceptive Site Ahead)")
+
+    # Authentic Domain Protection
+    if registered_domain in GLOBAL_TRUSTED_ROOTS and not heuristics_data.get("is_typosquat"):
+        total_score = 0.0
+        visual_data["is_visual_spoof"] = False
 
     final_score = min(round(total_score, 1), 100.0)
 
-    # 6. Assign Verdict
+    # 5. Verdict Classification
     if final_score >= 70.0 or visual_data.get("is_visual_spoof"):
         status_enum = ThreatStatus.CRITICAL_PHISHING
     elif final_score >= 30.0:
@@ -162,7 +155,7 @@ async def analyze_url(raw_url: str) -> ScanResponse:
 
     detected_brand = visual_data.get("matched_brand") or heuristics_data.get("target_candidate")
 
-    # 7. Persist to Database
+    # 6. Persist Result in Database
     saved_record = save_or_update_result(
         url=normalized,
         url_hash=url_hash_val,

@@ -11,7 +11,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.sql import func
 
-load_dotenv(Path(__file__).with_name(".env"))
+BASE_DIR = Path(__file__).resolve().parent
+load_dotenv(BASE_DIR / ".env")
 
 DATABASE_HOSTNAME = os.getenv("DATABASE_HOSTNAME")
 DATABASE_PORT = os.getenv("DATABASE_PORT")
@@ -26,16 +27,20 @@ if all((DATABASE_HOSTNAME, DATABASE_PORT, DATABASE_NAME, DATABASE_USERNAME, DATA
         f"{DATABASE_HOSTNAME}:{DATABASE_PORT}/"
         f"{DATABASE_NAME}"
     )
+    engine = create_engine(DATABASE_URL)
 else:
-    DATABASE_URL = "sqlite:///./quishshield.db"
-
-engine_args = {"connect_args": {"check_same_thread": False}} if DATABASE_URL.startswith("sqlite") else {}
-engine = create_engine(DATABASE_URL, **engine_args)
+    # Anchor SQLite to an absolute path inside backend/
+    DB_FILE = BASE_DIR / "quishshield.db"
+    DATABASE_URL = f"sqlite:///{DB_FILE}"
+    engine = create_engine(
+        DATABASE_URL,
+        connect_args={"check_same_thread": False, "timeout": 15},
+    )
 
 SessionLocal = sessionmaker(
     autocommit=False,
     autoflush=False,
-    bind=engine
+    bind=engine,
 )
 
 Base = declarative_base()
@@ -70,7 +75,7 @@ def hash_url(normalized_url: str) -> str:
 
 
 def lookup_url(url_hash: str):
-    """Query cache for an existing URL record."""
+    """Query cache for an existing URL record and increment hit count."""
     try:
         from .models import URLRecord
     except (ImportError, ValueError):
@@ -89,6 +94,9 @@ def lookup_url(url_hash: str):
             db.commit()
             db.refresh(record)
         return record
+    except Exception:
+        db.rollback()
+        return None
     finally:
         db.close()
 
@@ -133,5 +141,8 @@ def save_or_update_result(
         db.commit()
         db.refresh(record)
         return record
+    except Exception:
+        db.rollback()
+        return None
     finally:
         db.close()
